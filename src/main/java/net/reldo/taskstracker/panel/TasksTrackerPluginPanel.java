@@ -130,6 +130,13 @@ public class TasksTrackerPluginPanel extends PluginPanel
 		{
 			loggedInPanel.saveCurrentTabFilters();
 		}
+	}
 
+	public void refreshRouteSelector()
+	{
+		if (loggedInPanelVisible)
+		{
+			loggedInPanel.refreshRouteSelector();
+		}
 	}
 }

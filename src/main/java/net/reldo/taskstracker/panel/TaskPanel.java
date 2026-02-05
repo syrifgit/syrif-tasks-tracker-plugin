@@ -14,12 +14,18 @@ import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
 import javax.swing.BoxLayout;
 import javax.swing.ImageIcon;
+import javax.swing.JCheckBoxMenuItem;
 import javax.swing.JLabel;
+import javax.swing.JMenu;
 import javax.swing.JMenuItem;
+import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JPopupMenu;
 import javax.swing.JToggleButton;
@@ -29,7 +35,10 @@ import javax.swing.border.EmptyBorder;
 import lombok.extern.slf4j.Slf4j;
 import net.reldo.taskstracker.HtmlUtil;
 import net.reldo.taskstracker.TasksTrackerPlugin;
+import net.reldo.taskstracker.config.ConfigValues;
 import net.reldo.taskstracker.data.jsondatastore.types.TaskDefinitionSkill;
+import net.reldo.taskstracker.data.route.CustomRoute;
+import net.reldo.taskstracker.data.route.CustomRouteItem;
 import net.reldo.taskstracker.data.task.TaskFromStruct;
 import net.reldo.taskstracker.data.task.filters.FilterMatcher;
 import net.runelite.api.Constants;
@@ -236,10 +245,121 @@ public class TaskPanel extends JPanel
 	public JPopupMenu createWikiPopupMenu()
 	{
 		JPopupMenu popupMenu = new JPopupMenu();
+
+		// Wiki item
 		JMenuItem openWikiItem = new JMenuItem("Wiki");
 		openWikiItem.addActionListener(e -> openRuneScapeWiki());
 		popupMenu.add(openWikiItem);
+
+		popupMenu.addSeparator();
+
+		// Tags submenu
+		JMenu tagMenu = new JMenu("Tags");
+
+		// Pre-defined tags
+		String[] predefinedTags = {"early-game", "mid-game", "late-game"};
+		for (String tag : predefinedTags)
+		{
+			JCheckBoxMenuItem tagItem = new JCheckBoxMenuItem(tag);
+			tagItem.setSelected(task.hasTag(tag));
+			tagItem.addActionListener(e -> {
+				if (tagItem.isSelected())
+				{
+					task.addTag(tag);
+				}
+				else
+				{
+					task.removeTag(tag);
+				}
+				plugin.saveCurrentTaskTypeData();
+			});
+			tagMenu.add(tagItem);
+		}
+
+		// Show existing custom tags on this task
+		Set<String> customTags = task.getTags().stream()
+			.filter(t -> !Arrays.asList(predefinedTags).contains(t))
+			.collect(Collectors.toSet());
+
+		if (!customTags.isEmpty())
+		{
+			tagMenu.addSeparator();
+			for (String tag : customTags)
+			{
+				JCheckBoxMenuItem tagItem = new JCheckBoxMenuItem(tag);
+				tagItem.setSelected(true);
+				tagItem.addActionListener(e -> {
+					task.removeTag(tag);
+					plugin.saveCurrentTaskTypeData();
+				});
+				tagMenu.add(tagItem);
+			}
+		}
+
+		tagMenu.addSeparator();
+
+		// Custom tag option
+		JMenuItem addCustomTag = new JMenuItem("Add Custom Tag...");
+		addCustomTag.addActionListener(e -> promptForCustomTag());
+		tagMenu.add(addCustomTag);
+
+		popupMenu.add(tagMenu);
+
+		// Insert custom item menu (only show when route is active)
+		ConfigValues.TaskListTabs currentTab = plugin.getConfig().taskListTab();
+		CustomRoute activeRoute = plugin.getTaskService().getActiveRoute(currentTab);
+		if (activeRoute != null)
+		{
+			popupMenu.addSeparator();
+			JMenu insertMenu = new JMenu("Insert");
+
+			// Insert Before submenu
+			JMenu insertBeforeMenu = new JMenu("Before");
+			addInsertMenuItems(insertBeforeMenu, activeRoute, false);
+			insertMenu.add(insertBeforeMenu);
+
+			// Insert After submenu
+			JMenu insertAfterMenu = new JMenu("After");
+			addInsertMenuItems(insertAfterMenu, activeRoute, true);
+			insertMenu.add(insertAfterMenu);
+
+			popupMenu.add(insertMenu);
+		}
+
 		return popupMenu;
+	}
+
+	private void addInsertMenuItems(JMenu menu, CustomRoute route, boolean insertAfter)
+	{
+		String[] itemTypes = {"bank", "home_teleport", "fairy_ring"};
+		String[] itemLabels = {"Bank", "Home Teleport", "Fairy Ring"};
+
+		for (int i = 0; i < itemTypes.length; i++)
+		{
+			final String type = itemTypes[i];
+			JMenuItem item = new JMenuItem(itemLabels[i]);
+			item.addActionListener(e -> {
+				int taskId = task.getIntParam("id");
+				CustomRouteItem customItem = route.insertCustomItem(taskId, type, insertAfter);
+				if (customItem != null)
+				{
+					ConfigValues.TaskListTabs currentTab = plugin.getConfig().taskListTab();
+					plugin.saveRoute(currentTab, route);
+					plugin.pluginPanel.redraw();
+				}
+			});
+			menu.add(item);
+		}
+	}
+
+	private void promptForCustomTag()
+	{
+		String tag = JOptionPane.showInputDialog(this, "Enter tag name:", "Add Custom Tag", JOptionPane.PLAIN_MESSAGE);
+		if (tag != null && !tag.trim().isEmpty())
+		{
+			task.addTag(tag.trim().toLowerCase());
+			plugin.saveCurrentTaskTypeData();
+		}
 	}
 
 	private void openRuneScapeWiki()
@@ -292,6 +412,18 @@ public class TaskPanel extends JPanel
 
 	protected boolean meetsFilterCriteria()
 	{
+		// Check route filter first - if a route is active, only show tasks in that route
+		ConfigValues.TaskListTabs currentTab = plugin.getConfig().taskListTab();
+		CustomRoute activeRoute = plugin.getTaskService().getActiveRoute(currentTab);
+		if (activeRoute != null)
+		{
+			int taskId = task.getIntParam("id");
+			if (!activeRoute.getFlattenedOrder().contains(taskId))
+			{
+				return false;
+			}
+		}
+
 		return filterMatcher.meetsFilterCriteria(task, plugin.taskTextFilter);
 	}
 

@@ -1,12 +1,16 @@
 package net.reldo.taskstracker;
 
 import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import com.google.inject.Binder;
 import com.google.inject.Provides;
 import java.awt.Color;
 import java.awt.Toolkit;
+import java.awt.datatransfer.DataFlavor;
 import java.awt.datatransfer.StringSelection;
+import java.awt.datatransfer.UnsupportedFlavorException;
 import java.awt.image.BufferedImage;
+import java.io.IOException;
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -26,6 +30,7 @@ import javax.swing.JOptionPane;
 import javax.swing.SwingUtilities;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
+import net.reldo.taskstracker.config.ConfigValues;
 import net.reldo.taskstracker.data.Export;
 import net.reldo.taskstracker.data.LongSerializer;
 import net.reldo.taskstracker.data.TasksSummary;
@@ -33,6 +38,8 @@ import net.reldo.taskstracker.data.TrackerConfigStore;
 import net.reldo.taskstracker.data.jsondatastore.reader.DataStoreReader;
 import net.reldo.taskstracker.data.jsondatastore.reader.HttpDataStoreReader;
 import net.reldo.taskstracker.data.reldo.ReldoImport;
+import net.reldo.taskstracker.data.route.CustomRoute;
+import net.reldo.taskstracker.data.route.RouteSection;
 import net.reldo.taskstracker.data.task.TaskFromStruct;
 import net.reldo.taskstracker.data.task.TaskService;
 import net.reldo.taskstracker.data.task.TaskType;
@@ -101,8 +108,8 @@ public class TasksTrackerPlugin extends Plugin
 	@Getter	@Inject	private ConfigManager configManager;
 	@Getter @Inject	private TasksTrackerConfig config;
 
-	@Inject	private TrackerConfigStore trackerConfigStore;
-	@Inject private TaskService taskService;
+	@Getter @Inject	private TrackerConfigStore trackerConfigStore;
+	@Getter @Inject private TaskService taskService;
 	@Inject private FilterService filterService;
 
 	@Getter private FilterMatcher filterMatcher;
@@ -630,5 +637,230 @@ public class TasksTrackerPlugin extends Plugin
 				LinkBrowser.browse("https://www.osleague.tools/tracker?open=import&tab=tasks");
 			}
 		});
+	}
+
+	// --- Route Management ---
+
+	/**
+	 * Gets the clipboard text content.
+	 */
+	private String getClipboardText()
+	{
+		try
+		{
+			return (String) Toolkit.getDefaultToolkit().getSystemClipboard().getData(DataFlavor.stringFlavor);
+		}
+		catch (UnsupportedFlavorException | IOException e)
+		{
+			log.debug("Failed to read clipboard: {}", e.getMessage());
+			return null;
+		}
+	}
+
+	/**
+	 * Imports a route from the clipboard and adds it to the current tab.
+	 */
+	public void importRouteFromClipboard()
+	{
+		try
+		{
+			String json = getClipboardText();
+			if (json == null || json.isEmpty())
+			{
+				showMessageBox("Import Route Error", "Clipboard is empty", JOptionPane.ERROR_MESSAGE, false);
+				return;
+			}
+
+			CustomRoute route = gson.fromJson(json, CustomRoute.class);
+
+			// Validate
+			if (route.getName() == null || route.getName().isEmpty())
+			{
+				route.setName("Imported Route");
+			}
+			if (route.getTaskType() == null)
+			{
+				route.setTaskType(config.taskTypeJsonName());
+			}
+
+			// Warn if task type mismatch
+			if (!route.getTaskType().equals(config.taskTypeJsonName()))
+			{
+				JOptionPane optionPane = new JOptionPane(
+					"Route is for " + route.getTaskType() + " but current task type is " + config.taskTypeJsonName() + ". Import anyway?",
+					JOptionPane.WARNING_MESSAGE,
+					JOptionPane.YES_NO_OPTION
+				);
+				JDialog dialog = optionPane.createDialog(pluginPanel, "Task Type Mismatch");
+				dialog.setAlwaysOnTop(true);
+				dialog.setVisible(true);
+
+				Object selectedValue = optionPane.getValue();
+				if (selectedValue == null || !selectedValue.equals(JOptionPane.YES_OPTION))
+				{
+					return;
+				}
+				route.setTaskType(config.taskTypeJsonName());
+			}
+
+			ConfigValues.TaskListTabs currentTab = config.taskListTab();
+			trackerConfigStore.addRouteToTab(currentTab, config.taskTypeJsonName(), route);
+			trackerConfigStore.saveActiveRouteName(currentTab, config.taskTypeJsonName(), route.getName());
+
+			taskService.setActiveRoute(currentTab, route);
+			SwingUtilities.invokeLater(() -> {
+				pluginPanel.refreshRouteSelector();
+				pluginPanel.redraw();
+			});
+
+			showMessageBox("Route Imported", "Imported route: " + route.getName() + " (" + route.getTaskCount() + " tasks)", JOptionPane.INFORMATION_MESSAGE, false);
+		}
+		catch (Exception e)
+		{
+			showMessageBox("Import Route Error", "Failed to import route: " + e.getMessage(), JOptionPane.ERROR_MESSAGE, false);
+			log.error("Failed to import route", e);
+		}
+	}
+
+	/**
+	 * Exports the active route to the clipboard.
+	 */
+	public void exportActiveRoute()
+	{
+		ConfigValues.TaskListTabs currentTab = config.taskListTab();
+		CustomRoute route = trackerConfigStore.getActiveRoute(currentTab, config.taskTypeJsonName());
+
+		if (route == null)
+		{
+			showMessageBox("Export Route Error", "No active route to export", JOptionPane.ERROR_MESSAGE, false);
+			return;
+		}
+
+		// Use a GSON instance configured to serialize @Expose fields with pretty printing
+		Gson exportGson = new GsonBuilder()
+			.excludeFieldsWithoutExposeAnnotation()
+			.setPrettyPrinting()
+			.create();
+		String json = exportGson.toJson(route);
+
+		final StringSelection stringSelection = new StringSelection(json);
+		Toolkit.getDefaultToolkit().getSystemClipboard().setContents(stringSelection, null);
+
+		showMessageBox("Route Exported", "Exported route to clipboard: " + route.getName(), JOptionPane.INFORMATION_MESSAGE, false);
+	}
+
+	/**
+	 * Creates a new route from the current visible task order.
+	 */
+	public void createRouteFromCurrentOrder()
+	{
+		JOptionPane optionPane = new JOptionPane("Enter route name:", JOptionPane.PLAIN_MESSAGE);
+		optionPane.setWantsInput(true);
+		JDialog dialog = optionPane.createDialog(pluginPanel, "Create Route");
+		dialog.setAlwaysOnTop(true);
+		dialog.setVisible(true);
+
+		Object inputValue = optionPane.getInputValue();
+		if (inputValue == null || inputValue.equals("uninitializedValue") || inputValue.toString().trim().isEmpty())
+		{
+			return;
+		}
+
+		String name = inputValue.toString().trim();
+
+		// Get current visible tasks in display order
+		List<Integer> orderedIds = new ArrayList<>();
+		for (TaskFromStruct task : taskService.getTasks())
+		{
+			if (filterMatcher != null && filterMatcher.meetsFilterCriteria(task, taskTextFilter))
+			{
+				orderedIds.add(task.getIntParam("id"));
+			}
+		}
+
+		// Create single section with all tasks
+		RouteSection section = new RouteSection();
+		section.setName("All Tasks");
+		section.setTaskIds(orderedIds);
+
+		CustomRoute route = new CustomRoute();
+		route.setName(name);
+		route.setTaskType(config.taskTypeJsonName());
+		route.setSections(List.of(section));
+
+		ConfigValues.TaskListTabs currentTab = config.taskListTab();
+		trackerConfigStore.addRouteToTab(currentTab, config.taskTypeJsonName(), route);
+		trackerConfigStore.saveActiveRouteName(currentTab, config.taskTypeJsonName(), route.getName());
+
+		taskService.setActiveRoute(currentTab, route);
+		SwingUtilities.invokeLater(() -> {
+			pluginPanel.refreshRouteSelector();
+			pluginPanel.redraw();
+		});
+
+		showMessageBox("Route Created", "Created route: " + name + " (" + orderedIds.size() + " tasks)", JOptionPane.INFORMATION_MESSAGE, false);
+	}
+
+	/**
+	 * Deletes the active route from the current tab.
+	 */
+	public void deleteActiveRoute()
+	{
+		ConfigValues.TaskListTabs currentTab = config.taskListTab();
+		String activeRouteName = trackerConfigStore.loadActiveRouteName(currentTab, config.taskTypeJsonName());
+
+		if (activeRouteName == null)
+		{
+			return;
+		}
+
+		JOptionPane optionPane = new JOptionPane(
+			"Delete route '" + activeRouteName + "'?",
+			JOptionPane.WARNING_MESSAGE,
+			JOptionPane.YES_NO_OPTION
+		);
+		JDialog dialog = optionPane.createDialog(pluginPanel, "Delete Route");
+		dialog.setAlwaysOnTop(true);
+		dialog.setVisible(true);
+
+		Object selectedValue = optionPane.getValue();
+		if (selectedValue != null && selectedValue.equals(JOptionPane.YES_OPTION))
+		{
+			trackerConfigStore.removeRouteFromTab(currentTab, config.taskTypeJsonName(), activeRouteName);
+			taskService.setActiveRoute(currentTab, null);
+			SwingUtilities.invokeLater(() -> {
+				pluginPanel.refreshRouteSelector();
+				pluginPanel.redraw();
+			});
+		}
+	}
+
+	/**
+	 * Saves a route after modifications (e.g., inserting/removing custom items).
+	 */
+	public void saveRoute(ConfigValues.TaskListTabs tab, CustomRoute route)
+	{
+		if (route == null)
+		{
+			return;
+		}
+		trackerConfigStore.addRouteToTab(tab, config.taskTypeJsonName(), route);
+		taskService.setActiveRoute(tab, route);
+	}
+
+	/**
+	 * Saves the completion state of custom items for a route.
+	 */
+	public void saveCustomItemCompletion(ConfigValues.TaskListTabs tab, String routeName, Set<String> completedIds)
+	{
+		trackerConfigStore.saveCustomItemCompletion(tab, config.taskTypeJsonName(), routeName, completedIds);
+	}
+
+	/**
+	 * Loads the completion state of custom items for a route.
+	 */
+	public Set<String> loadCustomItemCompletion(ConfigValues.TaskListTabs tab, String routeName)
+	{
+		return trackerConfigStore.loadCustomItemCompletion(tab, config.taskTypeJsonName(), routeName);
 	}
 }

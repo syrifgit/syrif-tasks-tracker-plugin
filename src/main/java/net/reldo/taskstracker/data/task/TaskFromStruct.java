@@ -2,7 +2,9 @@ package net.reldo.taskstracker.data.task;
 
 import java.time.Instant;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
@@ -30,6 +32,8 @@ public class TaskFromStruct
 	private long trackedOn;
 	@Getter @Setter
 	private long ignoredOn;
+	@Getter @Setter
+	private Set<String> tags = new HashSet<>();
 
 	private StructComposition _struct;
 	private final Map<String, String> _stringParams = new HashMap<>();
@@ -145,9 +149,35 @@ public class TaskFromStruct
 		ignoredOn = state ? now : 0;
 	}
 
+	public void addTag(String tag)
+	{
+		if (tags == null)
+		{
+			tags = new HashSet<>();
+		}
+		tags.add(tag);
+	}
+
+	public void removeTag(String tag)
+	{
+		if (tags != null)
+		{
+			tags.remove(tag);
+		}
+	}
+
+	public boolean hasTag(String tag)
+	{
+		return tags != null && tags.contains(tag);
+	}
+
 	public void loadConfigSave(ConfigTaskSave loadedData)
 	{
 		setDates(loadedData.completed, loadedData.ignored, loadedData.tracked);
+		if (loadedData.tags != null)
+		{
+			this.tags = new HashSet<>(loadedData.tags);
+		}
 	}
 
 	public void loadReldoSave(ReldoTaskSave loadedData)

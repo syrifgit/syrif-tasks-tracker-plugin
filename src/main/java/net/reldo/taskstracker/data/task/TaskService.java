@@ -6,6 +6,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -18,11 +19,14 @@ import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 import net.reldo.taskstracker.TasksTrackerPlugin;
+import net.reldo.taskstracker.config.ConfigValues;
 import net.reldo.taskstracker.data.jsondatastore.ManifestClient;
 import net.reldo.taskstracker.data.jsondatastore.TaskDataClient;
 import net.reldo.taskstracker.data.jsondatastore.types.FilterConfig;
 import net.reldo.taskstracker.data.jsondatastore.types.FilterValueType;
 import net.reldo.taskstracker.data.jsondatastore.types.TaskDefinition;
+import net.reldo.taskstracker.data.route.CustomRoute;
+import net.reldo.taskstracker.data.route.RouteSection;
 import net.reldo.taskstracker.data.task.filters.FilterService;
 import net.runelite.api.Client;
 import net.runelite.api.EnumComposition;
@@ -52,6 +56,10 @@ public class TaskService
 	private HashMap<String, TaskType> _taskTypes = new HashMap<>();
 	private HashSet<Integer> currentTaskTypeVarps = new HashSet<>();
 	private final ExecutorService futureExecutor = Executors.newSingleThreadExecutor();
+
+	// Route management - stores active route and sort index per tab
+	private final Map<ConfigValues.TaskListTabs, CustomRoute> tabActiveRoutes = new HashMap<>();
+	private final Map<ConfigValues.TaskListTabs, int[]> tabRouteSortIndexes = new HashMap<>();
 
     public CompletableFuture<Boolean> setTaskType(String taskTypeJsonName) {
         return getTaskTypesByJsonName().thenCompose(taskTypes ->
@@ -302,5 +310,170 @@ public class TaskService
 			int taskId = t.getIntParam("id");
 			return taskId >= minTaskId && taskId <= maxTaskId;
 		}).collect(Collectors.toList());
+	}
+
+	// --- Route Management ---
+
+	/**
+	 * Sets the active route for a tab and builds the sort index.
+	 */
+	public void setActiveRoute(ConfigValues.TaskListTabs tab, CustomRoute route)
+	{
+		if (route == null)
+		{
+			tabActiveRoutes.remove(tab);
+			tabRouteSortIndexes.remove(tab);
+			return;
+		}
+
+		tabActiveRoutes.put(tab, route);
+		buildRouteSortIndex(tab, route);
+	}
+
+	/**
+	 * Gets the active route for a tab.
+	 */
+	public CustomRoute getActiveRoute(ConfigValues.TaskListTabs tab)
+	{
+		return tabActiveRoutes.get(tab);
+	}
+
+	/**
+	 * Checks if a tab has an active route.
+	 */
+	public boolean hasActiveRoute(ConfigValues.TaskListTabs tab)
+	{
+		return tabActiveRoutes.containsKey(tab);
+	}
+
+	/**
+	 * Builds the sort index for a route.
+	 * Tasks in the route are ordered by their position in the flattened order,
+	 * tasks not in the route are sorted to the end by ID.
+	 */
+	private void buildRouteSortIndex(ConfigValues.TaskListTabs tab, CustomRoute route)
+	{
+		List<Integer> flatOrder = route.getFlattenedOrder();
+		if (flatOrder.isEmpty())
+		{
+			tabRouteSortIndexes.remove(tab);
+			return;
+		}
+
+		// Create position map from flattened order
+		Map<Integer, Integer> positionMap = new HashMap<>();
+		for (int i = 0; i < flatOrder.size(); i++)
+		{
+			positionMap.put(flatOrder.get(i), i);
+		}
+
+		// Sort tasks: route tasks first (by position), then remaining by ID
+		List<TaskFromStruct> sorted = tasks.stream()
+			.sorted((t1, t2) -> {
+				Integer pos1 = positionMap.get(t1.getIntParam("id"));
+				Integer pos2 = positionMap.get(t2.getIntParam("id"));
+				if (pos1 != null && pos2 != null)
+				{
+					return pos1.compareTo(pos2);
+				}
+				if (pos1 != null)
+				{
+					return -1;  // Route tasks first
+				}
+				if (pos2 != null)
+				{
+					return 1;
+				}
+				return Integer.compare(t1.getIntParam("id"), t2.getIntParam("id"));
+			})
+			.collect(Collectors.toList());
+
+		// Build index array
+		int[] sortedIndex = new int[tasks.size()];
+		for (int i = 0; i < sorted.size(); i++)
+		{
+			sortedIndex[i] = tasks.indexOf(sorted.get(i));
+		}
+		tabRouteSortIndexes.put(tab, sortedIndex);
+	}
+
+	/**
+	 * Gets the sorted task index for a tab's active route.
+	 * Falls back to the given position if no route is active.
+	 */
+	public int getRouteSortedTaskIndex(ConfigValues.TaskListTabs tab, int position)
+	{
+		if (tabRouteSortIndexes.containsKey(tab))
+		{
+			int[] indexes = tabRouteSortIndexes.get(tab);
+			if (position < indexes.length)
+			{
+				return indexes[position];
+			}
+		}
+		return position;
+	}
+
+	/**
+	 * Gets a task by its ID (from the "id" int param).
+	 */
+	public TaskFromStruct getTaskById(int taskId)
+	{
+		return tasks.stream()
+			.filter(t -> taskId == t.getIntParam("id"))
+			.findFirst()
+			.orElse(null);
+	}
+
+	/**
+	 * Gets the section name for a task in the active route.
+	 * Returns null if no route is active or the task is not in any section.
+	 */
+	public String getSectionNameForTask(ConfigValues.TaskListTabs tab, int taskId)
+	{
+		CustomRoute route = tabActiveRoutes.get(tab);
+		if (route == null)
+		{
+			return null;
+		}
+
+		RouteSection section = route.getSectionForTask(taskId);
+		return section != null ? section.getName() : null;
+	}
+
+	/**
+	 * Checks if a task is the first task in its section.
+	 * Used to determine when to display section headers.
+	 */
+	public boolean isFirstTaskInSection(ConfigValues.TaskListTabs tab, int taskId)
+	{
+		CustomRoute route = tabActiveRoutes.get(tab);
+		if (route == null)
+		{
+			return false;
+		}
+		return route.isFirstTaskInSection(taskId);
+	}
+
+	/**
+	 * Gets the section for a task in the active route.
+	 */
+	public RouteSection getSectionForTask(ConfigValues.TaskListTabs tab, int taskId)
+	{
+		CustomRoute route = tabActiveRoutes.get(tab);
+		if (route == null)
+		{
+			return null;
+		}
+		return route.getSectionForTask(taskId);
+	}
+
+	/**
+	 * Clears the active route for a tab.
+	 */
+	public void clearActiveRoute(ConfigValues.TaskListTabs tab)
+	{
+		tabActiveRoutes.remove(tab);
+		tabRouteSortIndexes.remove(tab);
 	}
 }

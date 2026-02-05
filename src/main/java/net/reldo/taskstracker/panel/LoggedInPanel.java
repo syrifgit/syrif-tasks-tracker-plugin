@@ -5,6 +5,7 @@ import java.awt.Color;
 import java.awt.Dimension;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Optional;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
@@ -28,8 +29,10 @@ import net.reldo.taskstracker.TasksTrackerPlugin;
 import net.reldo.taskstracker.config.ConfigValues;
 import net.reldo.taskstracker.data.jsondatastore.types.FilterConfig;
 import net.reldo.taskstracker.data.jsondatastore.types.FilterType;
+import net.reldo.taskstracker.data.route.CustomRoute;
 import net.reldo.taskstracker.data.task.TaskService;
 import net.reldo.taskstracker.data.task.TaskType;
+import net.reldo.taskstracker.panel.components.RouteSelector;
 import net.reldo.taskstracker.panel.components.SearchBox;
 import net.reldo.taskstracker.panel.components.TriToggleButton;
 import net.reldo.taskstracker.panel.filters.ComboItem;
@@ -60,6 +63,7 @@ public class LoggedInPanel extends JPanel
 	// sub-filter panel
 	private SubFilterPanel subFilterPanel;
 	private SortPanel sortPanel;
+	private RouteSelector routeSelector;
 	private final JToggleButton collapseBtn = new JToggleButton();
 	private JToggleButton tabOne;
 	private JToggleButton tabTwo;
@@ -106,6 +110,7 @@ public class LoggedInPanel extends JPanel
 
 		taskListPanel.drawNewTaskType();
 		refreshFilterButtonsFromConfig(config.taskListTab());
+		refreshRouteSelector();
 	}
 
 	public void redraw()
@@ -178,7 +183,9 @@ public class LoggedInPanel extends JPanel
 			saveCurrentTabFilters();
 			plugin.getConfigManager().setConfiguration(TasksTrackerPlugin.CONFIG_GROUP_NAME, "taskListTab", newTab);
 			refreshFilterButtonsFromConfig(newTab);
-			plugin.refreshAllTasks();
+			refreshRouteSelector();
+			// Use redraw() to re-order tasks with section headers for the new tab's route
+			taskListPanel.redraw();
 		}
 	}
 
@@ -386,6 +393,12 @@ public class LoggedInPanel extends JPanel
 
 		sortPanel = new SortPanel(plugin, taskService, taskListPanel);
 
+		// Route selector
+		routeSelector = new RouteSelector();
+		routeSelector.setAlignmentX(LEFT_ALIGNMENT);
+		routeSelector.addRouteChangeListener(e -> onRouteSelectionChanged());
+		routeSelector.addManageListener(e -> showRouteManagementMenu());
+
 		northPanel.add(getTitleAndButtonPanel());
 		northPanel.add(Box.createVerticalStrut(10));
 		northPanel.add(taskTypeDropdown);
@@ -393,6 +406,8 @@ public class LoggedInPanel extends JPanel
 		northPanel.add(getSearchPanel());
 		northPanel.add(Box.createVerticalStrut(2));
 		northPanel.add(sortPanel);
+		northPanel.add(Box.createVerticalStrut(2));
+		northPanel.add(routeSelector);
 		northPanel.add(Box.createVerticalStrut(2));
 		northPanel.add(subFilterWrapper);
 
@@ -577,5 +592,79 @@ public class LoggedInPanel extends JPanel
 				});
 			});
 		});
+	}
+
+	// --- Route Management ---
+
+	/**
+	 * Refreshes the route selector dropdown with routes for the current tab and task type.
+	 */
+	public void refreshRouteSelector()
+	{
+		if (taskService.getCurrentTaskType() == null)
+		{
+			return;
+		}
+
+		ConfigValues.TaskListTabs currentTab = config.taskListTab();
+		String taskType = config.taskTypeJsonName();
+
+		List<CustomRoute> routes = plugin.getTrackerConfigStore().loadTabRoutes(currentTab, taskType);
+		String activeRouteName = plugin.getTrackerConfigStore().loadActiveRouteName(currentTab, taskType);
+
+		routeSelector.setRoutes(routes, activeRouteName);
+
+		// Update TaskService with active route
+		CustomRoute activeRoute = plugin.getTrackerConfigStore().getActiveRoute(currentTab, taskType);
+		taskService.setActiveRoute(currentTab, activeRoute);
+	}
+
+	/**
+	 * Called when the route dropdown selection changes.
+	 */
+	private void onRouteSelectionChanged()
+	{
+		String selectedRouteName = routeSelector.getSelectedRouteName();
+		ConfigValues.TaskListTabs currentTab = config.taskListTab();
+		String taskType = config.taskTypeJsonName();
+
+		plugin.getTrackerConfigStore().saveActiveRouteName(currentTab, taskType, selectedRouteName);
+
+		CustomRoute route = selectedRouteName != null
+			? plugin.getTrackerConfigStore().getActiveRoute(currentTab, taskType)
+			: null;
+		taskService.setActiveRoute(currentTab, route);
+
+		taskListPanel.redraw();
+	}
+
+	/**
+	 * Shows a popup menu with route management options.
+	 */
+	private void showRouteManagementMenu()
+	{
+		JPopupMenu menu = new JPopupMenu();
+
+		JMenuItem importItem = new JMenuItem("Import Route from Clipboard");
+		importItem.addActionListener(e -> plugin.importRouteFromClipboard());
+		menu.add(importItem);
+
+		JMenuItem exportItem = new JMenuItem("Export Active Route to Clipboard");
+		exportItem.setEnabled(routeSelector.hasRouteSelected());
+		exportItem.addActionListener(e -> plugin.exportActiveRoute());
+		menu.add(exportItem);
+
+		menu.addSeparator();
+
+		JMenuItem createItem = new JMenuItem("Create Route from Current Order...");
+		createItem.addActionListener(e -> plugin.createRouteFromCurrentOrder());
+		menu.add(createItem);
+
+		JMenuItem deleteItem = new JMenuItem("Delete Active Route");
+		deleteItem.setEnabled(routeSelector.hasRouteSelected());
+		deleteItem.addActionListener(e -> plugin.deleteActiveRoute());
+		menu.add(deleteItem);
+
+		menu.show(routeSelector, 0, routeSelector.getHeight());
 	}
 }

@@ -2,6 +2,7 @@ package net.reldo.taskstracker.data.task.filters;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import lombok.extern.slf4j.Slf4j;
 import net.reldo.taskstracker.TasksTrackerConfig;
 import net.reldo.taskstracker.config.ConfigValues.CompletedFilterValues;
@@ -118,6 +119,38 @@ public class FilterMatcher
 		if (config.trackedFilter().equals(TrackedFilterValues.TRACKED) && !task.isTracked())
 		{
 			return false;
+		}
+
+		return true;
+	}
+
+	/**
+	 * Checks if a task meets current UI filters plus tag requirements.
+	 * Task must have ALL required tags to pass.
+	 *
+	 * @param task The task to check
+	 * @param taskTextFilter The current text search filter, already lowercased (can be null)
+	 * @param requiredTags Set of tags the task must have (can be null or empty to skip tag filtering)
+	 * @return true if the task passes all filters including tags, false otherwise
+	 */
+	public boolean meetsFilterCriteria(TaskFromStruct task, String taskTextFilter, Set<String> requiredTags)
+	{
+		// First check existing filters
+		if (!meetsFilterCriteria(task, taskTextFilter))
+		{
+			return false;
+		}
+
+		// Tag filter - task must have ALL required tags
+		if (requiredTags != null && !requiredTags.isEmpty())
+		{
+			for (String tag : requiredTags)
+			{
+				if (!task.hasTag(tag))
+				{
+					return false;
+				}
+			}
 		}
 
 		return true;
